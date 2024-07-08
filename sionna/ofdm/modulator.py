@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 """Class definition for the OFDM Modulator"""
-
+import numpy as np
 import tensorflow as tf
 from tensorflow.keras.layers import Layer
 from tensorflow.signal import ifftshift
@@ -12,18 +12,18 @@ from sionna.signal import ifft
 
 
 class OFDMModulator(Layer):
+    # pylint: disable=line-too-long
     """
-    OFDMModulator(cyclic_prefix_length, **kwargs)
+    OFDMModulator(cyclic_prefix_length=0, **kwargs)
 
     Computes the time-domain representation of an OFDM resource grid
     with (optional) cyclic prefix.
 
     Parameters
     ----------
-    cyclic_prefix_length : int
-        Integer indicating the length of the
-        cyclic prefix that it prepended to each OFDM symbol. It cannot
-        be longer than the FFT size.
+    cyclic_prefix_length : int or list[int] or np.ndarray[int]
+        Integer or vector of integers indicating the length of the cyclic
+        prefix that it prepended to each OFDM symbol.
 
     Input
     -----
@@ -46,29 +46,59 @@ class OFDMModulator(Layer):
 
     @cyclic_prefix_length.setter
     def cyclic_prefix_length(self, value):
-        assert value >=0, "`cyclic_prefix_length` must be nonnegative."
+        if isinstance(value, list):
+            value = np.array(value)
+        if isinstance(value, np.ndarray):
+            assert (np.issubdtype(value.dtype, np.integer) and
+                    value.ndim == 1 and np.all(value >= 0)),\
+                ("`cyclic_prefix_length` must be a 1D array with"
+                 " only nonnegative integers.")
+        else:
+            assert isinstance(value, int) and value >=0,\
+                "`cyclic_prefix_length` must be a nonnegative integer."
         self._cyclic_prefix_length = value
 
     def build(self, input_shape):
-        # Verify that cyclic prefix is not longer than the FFT size.
         fft_size = input_shape[-1]
-        assert self.cyclic_prefix_length<=fft_size, \
-            "shape(inputs)[-1] must not be smaller than `cylic_prefix_length`"
+        num_ofdm_symbols = input_shape[-2]
+
+        if isinstance(self.cyclic_prefix_length, int):
+            self.cyclic_prefix_length = np.full(num_ofdm_symbols,
+                                                self.cyclic_prefix_length)
+        else:
+            assert len(self.cyclic_prefix_length) == num_ofdm_symbols,\
+                ("shape(inputs)[-2] must match size of lists of cyclic"
+                 " prefix lengths")
+
+        gather_idx = []
+        for i, cp_len in enumerate(self.cyclic_prefix_length):
+            assert cp_len <= fft_size, \
+                ("shape(inputs)[-1] must not be smaller than"
+                 " `cylic_prefix_length`")
+
+            gather_idx.append(tf.range(fft_size * (i + 1) - cp_len,
+                                       fft_size * (i + 1), dtype=tf.int32))
+            gather_idx.append(tf.range(fft_size * i,
+                                       fft_size * (i + 1), dtype=tf.int32))
+
+        self._gather_idx = tf.concat(gather_idx, 0)
 
     def call(self, inputs):
+        fft_size = tf.shape(inputs)[-1]
+        num_ofdm_symbols = tf.shape(inputs)[-2]
+        batch_dims = tf.shape(inputs)[:-2]
+
         # Shift DC subcarrier to first position
         inputs = ifftshift(inputs, axes=-1)
 
         # Compute IFFT along the last dimension
         x = ifft(inputs)
 
-        # Obtain cyclic prefix
-        cp = x[...,tf.shape(inputs)[-1]-self._cyclic_prefix_length:]
+        # Reshape into slots
+        new_shape = tf.concat([batch_dims, [num_ofdm_symbols * fft_size]], 0)
+        x = tf.reshape(x, new_shape)
 
-        # Prepend cyclic prefix
-        x = tf.concat([cp, x], -1)
-
-        # Serialize last two dimensions
-        x = flatten_last_dims(x, 2)
+        # Add cyclic prefix
+        x = tf.gather(x, self._gather_idx, axis=-1)
 
         return x

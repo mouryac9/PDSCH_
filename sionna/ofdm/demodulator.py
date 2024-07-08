@@ -15,7 +15,7 @@ import numpy as np
 class OFDMDemodulator(Layer):
     # pylint: disable=line-too-long
     r"""
-    OFDMDemodulator(fft_size, l_min, cyclic_prefix_length, **kwargs)
+    OFDMDemodulator(fft_size, l_min, cyclic_prefix_length=0, **kwargs)
 
     Computes the frequency-domain representation of an OFDM waveform
     with cyclic prefix removal.
@@ -49,7 +49,7 @@ class OFDMDemodulator(Layer):
     each subcarrier by  :math:`e^{\frac{-j2\pi k L_\text{min}}{N}}`.
     This is a very important step to enable channel estimation with
     sparse pilot patterns that needs to interpolate the channel frequency
-    response accross subcarriers. It also ensures that the
+    response across subcarriers. It also ensures that the
     channel frequency response `seen` by the time-domain channel
     is close to the :class:`~sionna.channel.OFDMChannel`.
 
@@ -63,9 +63,9 @@ class OFDMDemodulator(Layer):
         impulse response. It should be the same value as that used by the
         `cir_to_time_channel` function.
 
-    cyclic_prefix_length : int
-        Integer indicating the length of the cyclic prefix that
-        is prepended to each OFDM symbol.
+    cyclic_prefix_length : int or list[int] or np.ndarray[int]
+        Integer or vector of integers indicating the length of the cyclic
+        prefix that it prepended to each OFDM symbol.
 
     Input
     -----
@@ -80,7 +80,8 @@ class OFDMDemodulator(Layer):
         two dimension.
     """
 
-    def __init__(self, fft_size, l_min, cyclic_prefix_length=0, **kwargs):
+    def __init__(self, fft_size, l_min, cyclic_prefix_length=0,
+                 **kwargs):
         super().__init__(**kwargs)
         self.fft_size = fft_size
         self.l_min = l_min
@@ -92,7 +93,8 @@ class OFDMDemodulator(Layer):
 
     @fft_size.setter
     def fft_size(self, value):
-        assert value>0, "`fft_size` must be positive."
+        assert isinstance(value, int) and value>0,\
+            "`fft_size` must be a positive integer."
         self._fft_size = int(value)
 
     @property
@@ -110,23 +112,44 @@ class OFDMDemodulator(Layer):
 
     @cyclic_prefix_length.setter
     def cyclic_prefix_length(self, value):
-        assert value >=0, "`cyclic_prefix_length` must be nonnegative."
-        self._cyclic_prefix_length = int(value)
+        if isinstance(value, list):
+            value = np.array(value)
+        if isinstance(value, np.ndarray):
+            assert (np.issubdtype(value.dtype, np.integer) and
+                    value.ndim == 1 and np.all(value >= 0)),\
+                ("`cyclic_prefix_length` must be a 1D array with"
+                 " only nonnegative integers.")
+        else:
+            assert isinstance(value, int) and value >=0,\
+                "`cyclic_prefix_length` must be a nonnegative integer."
+        self._cyclic_prefix_length = value
 
-    def build(self, input_shape): # pylint: disable=unused-argument
+
+    def build(self, input_shape):
+        num_samples = input_shape[-1]
+
         tmp = -2 * PI * tf.cast(self.l_min, tf.float32) \
               / tf.cast(self.fft_size, tf.float32) \
               * tf.range(self.fft_size, dtype=tf.float32)
         self._phase_compensation = tf.exp(tf.complex(0., tmp))
 
-        # Compute number of elements that will be truncated
-        self._rest = np.mod(input_shape[-1],
-                                self.fft_size + self.cyclic_prefix_length)
+        if isinstance(self.cyclic_prefix_length, int):
+            self._num_ofdm_symbols = (input_shape[-1] //
+                          (self.fft_size + self.cyclic_prefix_length))
+            self.cyclic_prefix_length = np.full(self._num_ofdm_symbols,
+                                                self.cyclic_prefix_length)
+        else:
+            self._num_ofdm_symbols = self.cyclic_prefix_length.shape[0]
 
-        # Compute number of full OFDM symbols to be demodulated
-        self._num_ofdm_symbols = np.floor_divide(
-                                    input_shape[-1]-self._rest,
-                                    self.fft_size + self.cyclic_prefix_length)
+        symbol_ends = tf.math.cumsum(self.cyclic_prefix_length + self.fft_size)
+        assert num_samples >= symbol_ends[-1],\
+            "shape(inputs)[-1] must be larger or equal than samples per slot"
+
+        gather_idx = []
+        for i in range(self._num_ofdm_symbols):
+            gather_idx.append(tf.range(symbol_ends[i] - self.fft_size,
+                                       symbol_ends[i]))
+        self._gather_idx = tf.concat(gather_idx, 0)
 
     def call(self, inputs):
         """Demodulate OFDM waveform onto a resource grid.
@@ -139,17 +162,15 @@ class OFDMDemodulator(Layer):
             `tf.complex64` : The demodulated inputs of shape
             `[...,num_ofdm_symbols, fft_size]`.
         """
+        batch_dims = tf.shape(inputs)[:-1]
 
-        # Cut last samples that do not fit into an OFDM symbol
-        inputs = inputs if self._rest==0 else inputs[...,:-self._rest]
+        # Gather samples that do not belong to cyclic prefix
+        x = tf.gather(inputs, self._gather_idx, axis=-1)
 
         # Reshape input to separate OFDM symbols
-        new_shape = tf.concat([tf.shape(inputs)[:-1], [self._num_ofdm_symbols],
-                               [self.fft_size + self.cyclic_prefix_length]], 0)
-        x = tf.reshape(inputs, new_shape)
-
-        # Remove cyclic prefix
-        x = x[...,self.cyclic_prefix_length:]
+        new_shape = tf.concat([batch_dims,
+                               [self._num_ofdm_symbols, self.fft_size]], 0)
+        x = tf.reshape(x, new_shape)
 
         # Compute FFT
         x = fft(x)

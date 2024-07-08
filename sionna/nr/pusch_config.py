@@ -1051,7 +1051,7 @@ def check_pusch_configs(pusch_configs):
     }
     params["bandwidth"] = params["num_subcarriers"]*params["subcarrier_spacing"]
     params["cyclic_prefix_length"] = np.ceil(carrier.cyclic_prefix_length *
-                                             params["bandwidth"])
+                                             params["bandwidth"]).astype(int)
 
     for pusch_config in pusch_configs:
         if params["precoding"]=="codebook":
