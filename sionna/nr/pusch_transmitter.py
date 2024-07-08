@@ -168,7 +168,9 @@ class PUSCHTransmitter(Layer):
                             subcarrier_spacing=self._subcarrier_spacing,
                             num_tx=self._num_tx,
                             num_streams_per_tx=self._num_layers,
-                            cyclic_prefix_length=self._cyclic_prefix_length,
+                            # TODO: pass vector of cyclic prefix lengths
+                            # (requires rewrite of channel simulation code)
+                            cyclic_prefix_length=self._cyclic_prefix_length[1],
                             pilot_pattern=self._pilot_pattern,
                             dtype=dtype)
 
@@ -183,13 +185,7 @@ class PUSCHTransmitter(Layer):
 
         # (Optionally) Create OFDMModulator
         if self._output_domain=="time":
-            symbols_per_block = (self._carrier_config.num_slots_per_subframe *
-                             self._carrier_config.num_symbols_per_slot // 2)
-            self._ofdm_modulator = OFDMModulator(
-                cyclic_prefix_length=self._cyclic_prefix_length,
-                cyclic_prefix_length_first_symbol=
-                    self._cyclic_prefix_length_first_symbol,
-                symbols_per_block=symbols_per_block)
+            self._ofdm_modulator = OFDMModulator(cyclic_prefix_length=self._cyclic_prefix_length)
 
     #########################################
     # Public methods and properties
